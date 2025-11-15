@@ -12,6 +12,12 @@
 (define-constant ERR-EXPIRED-VERIFICATION (err u108))
 (define-constant ERR-ALREADY-GRANTED (err u109))
 (define-constant ERR-NOT-GRANTED (err u110))
+(define-constant ERR-ALREADY-REPORTED (err u111))
+(define-constant ERR-INSUFFICIENT-REPUTATION (err u112))
+(define-constant ERR-INVALID-SLASH-AMOUNT (err u113))
+
+(define-constant SLASHING-THRESHOLD u20)
+(define-constant MIN-REPUTATION u10)
 
 (define-data-var verification-fee uint u1000000)
 (define-data-var verification-validity-period uint u52560)
@@ -67,6 +73,16 @@
     }
 )
 
+(define-map verifier-slashing-reports
+    {reporter: principal, verifier: principal}
+    {
+        reported: bool,
+        reported-at: uint,
+        reason-hash: (buff 32),
+        processed: bool
+    }
+)
+
 (define-read-only (get-verifier (verifier principal))
     (map-get? verifiers verifier)
 )
@@ -116,6 +132,17 @@
 
 (define-read-only (get-verification-validity)
     (ok (var-get verification-validity-period))
+)
+
+(define-read-only (get-slashing-report (reporter principal) (verifier principal))
+    (map-get? verifier-slashing-reports {reporter: reporter, verifier: verifier})
+)
+
+(define-read-only (is-verifier-slashable (verifier principal))
+    (match (map-get? verifiers verifier)
+        verifier-data (< (get reputation-score verifier-data) SLASHING-THRESHOLD)
+        false
+    )
 )
 
 (define-public (register-verifier)
@@ -308,5 +335,53 @@
         (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
         (var-set verification-validity-period new-validity)
         (ok true)
+    )
+)
+
+(define-public (report-verifier (verifier principal) (reason-hash (buff 32)))
+    (let
+        (
+            (reporter tx-sender)
+        )
+        (asserts! (is-verifier verifier) ERR-INVALID-VERIFIER)
+        (asserts! (> (len reason-hash) u0) ERR-INVALID-HASH)
+        (asserts! (is-none (map-get? verifier-slashing-reports {reporter: reporter, verifier: verifier})) ERR-ALREADY-REPORTED)
+        (map-set verifier-slashing-reports {reporter: reporter, verifier: verifier} {
+            reported: true,
+            reported-at: stacks-block-height,
+            reason-hash: reason-hash,
+            processed: false
+        })
+        (ok true)
+    )
+)
+
+(define-public (slash-verifier (verifier principal) (slash-amount uint))
+    (let
+        (
+            (caller tx-sender)
+        )
+        (asserts! (is-eq caller CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (asserts! (is-verifier verifier) ERR-INVALID-VERIFIER)
+        (asserts! (> slash-amount u0) ERR-INVALID-SLASH-AMOUNT)
+        (match (map-get? verifiers verifier)
+            verifier-data 
+                (let
+                    (
+                        (current-reputation (get reputation-score verifier-data))
+                        (new-reputation (if (> current-reputation slash-amount)
+                            (- current-reputation slash-amount)
+                            u0
+                        ))
+                        (should-deactivate (< new-reputation MIN-REPUTATION))
+                    )
+                    (map-set verifiers verifier (merge verifier-data {
+                        reputation-score: new-reputation,
+                        active: (not should-deactivate)
+                    }))
+                    (ok true)
+                )
+            ERR-VERIFIER-NOT-FOUND
+        )
     )
 )
